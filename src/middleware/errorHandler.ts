@@ -23,19 +23,21 @@ export const errorHandler = (
   if (err instanceof AppError) {
     res.status(err.statusCode).json({
       success: false,
+      message: err.message,
       error: {
         code: err.code,
-        message: err.message
-      }
+        message: err.message,
+      },
     });
     return;
   }
 
   res.status(500).json({
     success: false,
+    message: 'An unexpected internal server error occurred.',
     error: {
       code: 'INTERNAL_SERVER_ERROR',
-      message: 'An unexpected internal server error occurred.'
-    }
+      message: 'An unexpected internal server error occurred.',
+    },
   });
 };

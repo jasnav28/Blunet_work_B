@@ -4,12 +4,12 @@ import { AppError } from '../../middleware/errorHandler.js';
 import { logAudit } from '../../utils/audit.js';
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
-  TODO: ['IN_PROGRESS', 'CANCELLED', 'SUBMITTED'],
-  IN_PROGRESS: ['COMPLETED', 'TODO', 'CANCELLED', 'SUBMITTED'],
-  SUBMITTED: ['COMPLETED', 'IN_PROGRESS', 'TODO'],
-  COMPLETED: ['IN_PROGRESS', 'SUBMITTED'],
-  CANCELLED: ['TODO'],
-  OVERDUE: ['IN_PROGRESS', 'COMPLETED', 'SUBMITTED'],
+  TODO: ['IN_PROGRESS', 'CANCELLED', 'SUBMITTED', 'TODO'],
+  IN_PROGRESS: ['COMPLETED', 'TODO', 'CANCELLED', 'SUBMITTED', 'IN_PROGRESS'],
+  SUBMITTED: ['COMPLETED', 'IN_PROGRESS', 'TODO', 'SUBMITTED'],
+  COMPLETED: ['IN_PROGRESS', 'SUBMITTED', 'COMPLETED'],
+  CANCELLED: ['TODO', 'CANCELLED'],
+  OVERDUE: ['IN_PROGRESS', 'COMPLETED', 'SUBMITTED', 'OVERDUE'],
 };
 
 export const getMyTasks = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -113,14 +113,18 @@ export const createTask = async (req: Request, res: Response, next: NextFunction
       },
     });
 
-    await db.notification.create({
-      data: {
-        userId: String(assignedToId),
-        title: 'New Task Assigned',
-        message: `Task "${title}" assigned by ${req.user?.name}.`,
-        link: '/tasks',
-      },
-    });
+    try {
+      await db.notification.create({
+        data: {
+          userId: String(assignedToId),
+          title: 'New Task Assigned',
+          message: `Task "${title}" assigned by ${req.user?.name}.`,
+          link: '/tasks',
+        },
+      });
+    } catch (notifErr) {
+      console.warn('Non-critical error creating assignment notification:', notifErr);
+    }
 
     await logAudit(assignedById, 'TASK_CREATED', 'Task', task.id, { title, assignedToId }, req.ip);
 
@@ -150,12 +154,14 @@ export const updateTaskStatus = async (req: Request, res: Response, next: NextFu
       throw new AppError('Task not found.', 404, 'NOT_FOUND');
     }
 
-    if (role === 'EMPLOYEE' && task.assignedToId !== userId) {
+    const isAdminOrManagement = role === 'ADMIN' || role === 'MARKETING_HEAD' || role === 'FOUNDER';
+
+    if (!isAdminOrManagement && task.assignedToId !== userId) {
       throw new AppError('You can only update your own assigned tasks.', 403, 'FORBIDDEN');
     }
 
     const allowed = VALID_TRANSITIONS[task.status] || [];
-    if (!allowed.includes(status) && role === 'EMPLOYEE') {
+    if (!isAdminOrManagement && !allowed.includes(status)) {
       throw new AppError(`Invalid status transition from ${task.status} to ${status}.`, 400, 'INVALID_TRANSITION');
     }
 
@@ -173,33 +179,49 @@ export const updateTaskStatus = async (req: Request, res: Response, next: NextFu
       if (submissionDetails) contentStr += `\n\nDetails:\n${submissionDetails}`;
       if (submissionLinks) contentStr += `\n\nRelated Links:\n${submissionLinks}`;
 
-      await db.taskComment.create({
-        data: {
-          taskId: id,
-          authorId: String(userId),
-          content: contentStr,
-        },
-      });
+      try {
+        if (userId) {
+          await db.taskComment.create({
+            data: {
+              taskId: id,
+              authorId: String(userId),
+              content: contentStr,
+            },
+          });
+        }
 
-      if (task.assignedById) {
-        await db.notification.create({
-          data: {
-            userId: task.assignedById,
-            title: 'Task Submitted for Review',
-            message: `${req.user?.name || 'Employee'} submitted task "${task.title}" for review.`,
-            link: '/tasks',
-          },
-        });
+        if (task.assignedById) {
+          const assigner = await db.user.findUnique({ where: { id: task.assignedById } });
+          if (assigner) {
+            await db.notification.create({
+              data: {
+                userId: task.assignedById,
+                title: 'Task Submitted for Review',
+                message: `${req.user?.name || 'Employee'} submitted task "${task.title}" for review.`,
+                link: '/tasks',
+              },
+            });
+          }
+        }
+      } catch (logErr) {
+        console.warn('Non-fatal error creating submission log or notification:', logErr);
       }
     } else if (status === 'COMPLETED' && task.assignedToId) {
-      await db.notification.create({
-        data: {
-          userId: task.assignedToId,
-          title: 'Task Approved & Completed',
-          message: `Your submitted task "${task.title}" has been reviewed and marked as COMPLETED by ${req.user?.name}.`,
-          link: '/tasks',
-        },
-      });
+      try {
+        const assignee = await db.user.findUnique({ where: { id: task.assignedToId } });
+        if (assignee) {
+          await db.notification.create({
+            data: {
+              userId: task.assignedToId,
+              title: 'Task Approved & Completed',
+              message: `Your submitted task "${task.title}" has been reviewed and marked as COMPLETED by ${req.user?.name}.`,
+              link: '/tasks',
+            },
+          });
+        }
+      } catch (logErr) {
+        console.warn('Non-fatal error creating completion notification:', logErr);
+      }
     }
 
     await logAudit(userId, 'TASK_STATUS_UPDATED', 'Task', id, { from: task.status, to: status }, req.ip);
