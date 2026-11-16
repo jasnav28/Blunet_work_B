@@ -16,7 +16,7 @@ export const VALID_OUTCOMES = [
 
 export const getActiveLead = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { campaignId } = req.query;
+    const { campaignId, leadId } = req.query;
 
     const campaignWhere = campaignId
       ? { id: String(campaignId) }
@@ -30,20 +30,68 @@ export const getActiveLead = async (req: Request, res: Response, next: NextFunct
     if (!campaign) {
       res.status(200).json({
         success: true,
-        data: { activeLead: null, totalLeads: 0, completedLeads: 0, campaign: null },
+        data: { activeLead: null, pendingLeads: [], pendingCount: 0, totalLeads: 0, completedLeads: 0, campaign: null },
       });
       return;
     }
 
-    // Find current active lead (first AVAILABLE or RESPONSE_PENDING lead)
-    const activeLead = await db.lead.findFirst({
+    let activeLead = null;
+
+    // 1. If explicit leadId requested (e.g. from client session storage or call-again selection)
+    if (leadId) {
+      activeLead = await db.lead.findFirst({
+        where: {
+          id: String(leadId),
+          campaignId: campaign.id,
+        },
+        include: {
+          responses: { orderBy: { createdAt: 'desc' }, take: 3 },
+        },
+      });
+    }
+
+    // 2. If no valid requested leadId, find first AVAILABLE lead (current sequential dialing position)
+    if (!activeLead) {
+      activeLead = await db.lead.findFirst({
+        where: {
+          campaignId: campaign.id,
+          status: 'AVAILABLE',
+        },
+        orderBy: { sequenceNumber: 'asc' },
+        include: {
+          responses: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+      });
+    }
+
+    // 3. If no AVAILABLE lead, pick first RESPONSE_PENDING lead awaiting notes
+    if (!activeLead) {
+      activeLead = await db.lead.findFirst({
+        where: {
+          campaignId: campaign.id,
+          status: 'RESPONSE_PENDING',
+        },
+        orderBy: { sequenceNumber: 'asc' },
+        include: {
+          responses: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+      });
+    }
+
+    // 4. Fetch list of all leads currently awaiting response notes (RESPONSE_PENDING)
+    const pendingLeads = await db.lead.findMany({
       where: {
         campaignId: campaign.id,
-        status: { in: ['AVAILABLE', 'RESPONSE_PENDING'] },
+        status: 'RESPONSE_PENDING',
       },
       orderBy: { sequenceNumber: 'asc' },
-      include: {
-        responses: { orderBy: { createdAt: 'desc' }, take: 1 },
+      select: {
+        id: true,
+        sequenceNumber: true,
+        businessName: true,
+        phone: true,
+        status: true,
+        updatedAt: true,
       },
     });
 
@@ -60,6 +108,8 @@ export const getActiveLead = async (req: Request, res: Response, next: NextFunct
       data: {
         campaign,
         activeLead,
+        pendingLeads,
+        pendingCount: pendingLeads.length,
         totalLeads,
         completedLeads,
         remainingLeads: totalLeads - completedLeads,
@@ -86,10 +136,6 @@ export const markCallMade = async (req: Request, res: Response, next: NextFuncti
       throw new AppError('This lead is locked. Complete the previous lead first.', 403, 'LEAD_LOCKED');
     }
 
-    if (lead.status === 'COMPLETED') {
-      throw new AppError('This lead is already completed.', 400, 'LEAD_ALREADY_COMPLETED');
-    }
-
     // Transition state from AVAILABLE to RESPONSE_PENDING
     const updatedLead = await db.lead.update({
       where: { id: lead.id },
@@ -102,6 +148,95 @@ export const markCallMade = async (req: Request, res: Response, next: NextFuncti
       success: true,
       data: updatedLead,
       message: 'Call marked as made. Please record customer response.',
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const markCallMadeAndNext = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const id = String(req.params.id);
+    const userId = req.user?.userId;
+
+    const lead = await db.lead.findUnique({ where: { id } });
+    if (!lead) {
+      throw new AppError('Lead not found.', 404, 'LEAD_NOT_FOUND');
+    }
+
+    // Set current lead as RESPONSE_PENDING so notes can be recorded later
+    await db.lead.update({
+      where: { id: lead.id },
+      data: { status: 'RESPONSE_PENDING' },
+    });
+
+    // Unlock next sequential lead in campaign
+    const nextLead = await db.lead.findFirst({
+      where: {
+        campaignId: lead.campaignId,
+        sequenceNumber: lead.sequenceNumber + 1,
+      },
+      include: {
+        responses: { orderBy: { createdAt: 'desc' }, take: 1 },
+      },
+    });
+
+    if (nextLead && nextLead.status === 'LOCKED') {
+      await db.lead.update({
+        where: { id: nextLead.id },
+        data: { status: 'AVAILABLE' },
+      });
+      nextLead.status = 'AVAILABLE';
+    }
+
+    await logAudit(userId, 'LEAD_CALL_MADE_NEXT', 'Lead', lead.id, { nextLeadId: nextLead?.id }, req.ip);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        pendingLeadId: lead.id,
+        nextLead: nextLead || null,
+      },
+      message: 'Call logged! You can enter response notes later. Next lead unlocked.',
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const callAgainLead = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const id = String(req.params.id);
+    const userId = req.user?.userId;
+
+    const lead = await db.lead.findUnique({
+      where: { id },
+      include: {
+        responses: { orderBy: { createdAt: 'desc' }, take: 3 },
+      },
+    });
+
+    if (!lead) {
+      throw new AppError('Lead not found.', 404, 'LEAD_NOT_FOUND');
+    }
+
+    // Reactivate lead to RESPONSE_PENDING so caller can record follow-up call response
+    const updated = await db.lead.update({
+      where: { id: lead.id },
+      data: {
+        status: 'RESPONSE_PENDING',
+      },
+      include: {
+        responses: { orderBy: { createdAt: 'desc' }, take: 3 },
+      },
+    });
+
+    await logAudit(userId, 'LEAD_CALL_AGAIN', 'Lead', lead.id, { previousOutcome: lead.outcome }, req.ip);
+
+    res.status(200).json({
+      success: true,
+      data: updated,
+      message: `Lead #${lead.sequenceNumber} (${lead.businessName}) activated for follow-up call.`,
     });
   } catch (err) {
     next(err);
@@ -143,10 +278,6 @@ export const submitResponse = async (req: Request, res: Response, next: NextFunc
         throw new AppError('Cannot save response for a locked lead. Complete the previous lead first.', 403, 'LEAD_LOCKED');
       }
 
-      if (currentLead.status === 'COMPLETED') {
-        throw new AppError('This lead has already been completed.', 400, 'DUPLICATE_SUBMISSION');
-      }
-
       // Record Lead Interaction Response
       const response = await tx.leadResponse.create({
         data: {
@@ -170,7 +301,7 @@ export const submitResponse = async (req: Request, res: Response, next: NextFunc
         },
       });
 
-      // Unlock next sequential lead in campaign
+      // Unlock next sequential lead in campaign if it was locked
       const nextLead = await tx.lead.findFirst({
         where: {
           campaignId: currentLead.campaignId,
@@ -181,12 +312,15 @@ export const submitResponse = async (req: Request, res: Response, next: NextFunc
       let nextLeadAvailable = false;
       let nextLeadId: string | null = null;
 
-      if (nextLead) {
+      if (nextLead && nextLead.status === 'LOCKED') {
         await tx.lead.update({
           where: { id: nextLead.id },
           data: { status: 'AVAILABLE' },
         });
         nextLeadAvailable = true;
+        nextLeadId = nextLead.id;
+      } else if (nextLead) {
+        nextLeadAvailable = nextLead.status === 'AVAILABLE' || nextLead.status === 'RESPONSE_PENDING';
         nextLeadId = nextLead.id;
       }
 
@@ -255,7 +389,7 @@ export const getCompletedLeads = async (req: Request, res: Response, next: NextF
 
 export const getLeadQueue = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { campaignId, limit = 10 } = req.query;
+    const { campaignId, limit = 15 } = req.query;
 
     const campaign = campaignId
       ? await db.leadCampaign.findUnique({ where: { id: String(campaignId) } })
@@ -266,28 +400,81 @@ export const getLeadQueue = async (req: Request, res: Response, next: NextFuncti
       return;
     }
 
-    const lockedLeads = await db.lead.findMany({
+    const allLeads = await db.lead.findMany({
       where: {
         campaignId: campaign.id,
-        status: 'LOCKED',
       },
       orderBy: { sequenceNumber: 'asc' },
       take: parseInt(String(limit), 10),
       select: {
         id: true,
         sequenceNumber: true,
+        businessName: true,
+        phone: true,
         status: true,
+        outcome: true,
       },
     });
 
     res.status(200).json({
       success: true,
-      data: lockedLeads.map((l) => ({
+      data: allLeads.map((l) => ({
         id: l.id,
         sequenceNumber: l.sequenceNumber,
+        businessName: l.businessName,
+        phone: l.phone,
         status: l.status,
-        label: `🔒 Lead #${String(l.sequenceNumber).padStart(3, '0')} (Locked)`,
+        outcome: l.outcome,
+        label: l.status === 'LOCKED'
+          ? `🔒 Lead #${String(l.sequenceNumber).padStart(3, '0')} (Locked)`
+          : l.status === 'RESPONSE_PENDING'
+          ? `⏳ Lead #${String(l.sequenceNumber).padStart(3, '0')}: ${l.businessName} (Pending Notes)`
+          : l.status === 'AVAILABLE'
+          ? `📞 Lead #${String(l.sequenceNumber).padStart(3, '0')}: ${l.businessName} (Ready to Call)`
+          : `✓ Lead #${String(l.sequenceNumber).padStart(3, '0')}: ${l.businessName} (${l.outcome || 'Completed'})`,
       })),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const getLeadsByOutcome = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const outcome = String(req.params.outcome).toUpperCase();
+    const { campaignId } = req.query;
+
+    const campaign = campaignId
+      ? await db.leadCampaign.findUnique({ where: { id: String(campaignId) } })
+      : await db.leadCampaign.findFirst({ where: { status: 'ACTIVE' }, orderBy: { createdAt: 'desc' } });
+
+    const where: any = {
+      outcome,
+    };
+    if (campaign) {
+      where.campaignId = campaign.id;
+    }
+
+    const leads = await db.lead.findMany({
+      where,
+      orderBy: { sequenceNumber: 'asc' },
+      include: {
+        responses: {
+          orderBy: { createdAt: 'desc' },
+          include: {
+            user: { select: { id: true, name: true, employeeId: true } },
+          },
+        },
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        outcome,
+        total: leads.length,
+        leads,
+      },
     });
   } catch (err) {
     next(err);

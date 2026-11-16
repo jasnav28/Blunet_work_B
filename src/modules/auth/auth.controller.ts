@@ -20,6 +20,9 @@ export const login = async (req: Request, res: Response, next: NextFunction): Pr
         OR: [
           { employeeId: trimmedInput },
           { email: trimmedInput },
+          { employeeId: trimmedInput.toLowerCase() },
+          { employeeId: trimmedInput.toUpperCase() },
+          { email: trimmedInput.toLowerCase() },
         ],
       },
       include: { department: true },

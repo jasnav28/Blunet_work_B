@@ -37,6 +37,7 @@ async function main() {
   const ma1011PasswordHash = await bcrypt.hash('Password#1234', 10);
   const an1012PasswordHash = await bcrypt.hash('Password#4321', 10);
   const founderPasswordHash = await bcrypt.hash('Founder#1234', 10);
+  const beastPasswordHash = await bcrypt.hash('Beast@123', 10);
 
   // Clear previous dummy users and transactional data cleanly
   await prisma.taskComment.deleteMany({});
@@ -120,7 +121,21 @@ async function main() {
     },
   });
 
-  console.log('✅ Created Real Accounts: admin, EMP1022, MA1011, AN1012, FOUNDER01');
+  const beastUser = await prisma.user.create({
+    data: {
+      employeeId: 'Beast@123',
+      name: 'Beast Marketing',
+      email: 'beast@blunet.com',
+      phone: '+91 98765 43215',
+      passwordHash: beastPasswordHash,
+      role: 'MARKETING_HEAD',
+      designation: 'Marketing Head',
+      departmentId: deptMkt.id,
+      joiningDate: new Date('2024-03-01'),
+    },
+  });
+
+  console.log('✅ Created Real Accounts: admin, EMP1022, MA1011, AN1012, FOUNDER01, Beast@123');
 
   // 3. Resource Categories
   const categories = [
@@ -231,6 +246,18 @@ async function main() {
       dueDate: new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000),
       assignedById: ma1011User.id,
       assignedToId: empUser.id,
+    },
+  });
+
+  await prisma.task.create({
+    data: {
+      title: 'Enterprise Marketing & Client Acquisition Strategy',
+      description: 'Review lead conversion metrics, optimize sequential outreach queue, and track monthly sales targets.',
+      priority: 'HIGH',
+      status: 'IN_PROGRESS',
+      dueDate: new Date(now.getTime() + 5 * 24 * 60 * 60 * 1000),
+      assignedById: adminUser.id,
+      assignedToId: beastUser.id,
     },
   });
 
