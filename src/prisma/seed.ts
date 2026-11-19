@@ -38,6 +38,7 @@ async function main() {
   const an1012PasswordHash = await bcrypt.hash('Password#4321', 10);
   const founderPasswordHash = await bcrypt.hash('Founder#1234', 10);
   const beastPasswordHash = await bcrypt.hash('Beast@123', 10);
+  const mounendraPasswordHash = await bcrypt.hash('Mounendra@123', 10);
 
   // Clear previous dummy users and transactional data cleanly
   await prisma.taskComment.deleteMany({});
@@ -135,7 +136,21 @@ async function main() {
     },
   });
 
-  console.log('✅ Created Real Accounts: admin, EMP1022, MA1011, AN1012, FOUNDER01, Beast@123');
+  const mounendraUser = await prisma.user.create({
+    data: {
+      employeeId: 'BLU-EMP-003',
+      name: 'MOUNENDRA GOWA M',
+      email: 'Mounendra@123',
+      phone: '+91 98765 43216',
+      passwordHash: mounendraPasswordHash,
+      role: 'MARKETING_HEAD',
+      designation: 'Marketing Executive',
+      departmentId: deptMkt.id,
+      joiningDate: new Date('2026-11-23'),
+    },
+  });
+
+  console.log('✅ Created Real Accounts: admin, EMP1022, MA1011, AN1012, FOUNDER01, Beast@123, BLU-EMP-003 (MOUNENDRA)');
 
   // 3. Resource Categories
   const categories = [

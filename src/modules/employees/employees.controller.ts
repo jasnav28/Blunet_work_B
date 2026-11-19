@@ -74,7 +74,7 @@ export const getEmployees = async (req: Request, res: Response, next: NextFuncti
 
 export const createEmployee = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { name, email, phone, role, designation, departmentId, temporaryPassword } = req.body;
+    const { name, email, phone, role, designation, departmentId, temporaryPassword, joiningDate } = req.body;
 
     if (!name || !email || !role || !designation || !temporaryPassword) {
       throw new AppError('Name, email, role, designation, and temporary password are required.', 400, 'MISSING_FIELDS');
@@ -108,6 +108,7 @@ export const createEmployee = async (req: Request, res: Response, next: NextFunc
         role,
         designation,
         departmentId: departmentId || null,
+        joiningDate: joiningDate ? new Date(joiningDate) : undefined,
         passwordHash,
       },
       select: {
@@ -172,7 +173,7 @@ export const getEmployeeById = async (req: Request, res: Response, next: NextFun
 export const updateEmployee = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const id = String(req.params.id);
-    const { name, phone, role, designation, departmentId, isActive, newPassword } = req.body;
+    const { name, phone, role, designation, departmentId, isActive, newPassword, joiningDate } = req.body;
 
     const dataToUpdate: any = {};
     if (name !== undefined) dataToUpdate.name = name;
@@ -181,6 +182,7 @@ export const updateEmployee = async (req: Request, res: Response, next: NextFunc
     if (designation !== undefined) dataToUpdate.designation = designation;
     if (departmentId !== undefined) dataToUpdate.departmentId = departmentId;
     if (isActive !== undefined) dataToUpdate.isActive = isActive;
+    if (joiningDate !== undefined) dataToUpdate.joiningDate = new Date(joiningDate);
 
     if (newPassword) {
       dataToUpdate.passwordHash = await hashPassword(newPassword);
